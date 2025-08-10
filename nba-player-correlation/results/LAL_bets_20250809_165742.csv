@@ -1,0 +1,4 @@
+player,stat,direction,correlation,edge,odds,confidence
+1,PTS,OVER,0.223,0.043,"{'over': 1.91, 'under': 1.91}",LOW
+1,PTS,OVER,0.213,0.04,"{'over': 1.91, 'under': 1.91}",LOW
+2,AST,OVER,0.223,0.02,"{'over': 1.83, 'under': 1.83}",LOW

@@ -1,0 +1,5 @@
+Player 1,Player 2,Stat Pair,Correlation,P-value,Overlap Games,Direction
+Anthony Davis,D'Angelo Russell,PTS vs AST,0.223,0.0272,98,Positive
+D'Angelo Russell,Austin Reaves,PTS vs AST,0.213,0.0254,110,Positive
+LeBron James,Austin Reaves,AST vs AST,0.199,0.0371,110,Positive
+LeBron James,Anthony Davis,AST vs AST,-0.170,0.0916,100,Negative

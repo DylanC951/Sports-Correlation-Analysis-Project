@@ -1,0 +1,30 @@
+{
+  "status": 200,
+  "json": {
+    "timestamp": "2024-10-29T23:55:39Z",
+    "previous_timestamp": "2024-10-29T23:50:39Z",
+    "next_timestamp": "2024-10-30T00:00:39Z",
+    "data": {
+      "id": "15893327c28d5d11f74b1b9a0560aa78",
+      "sport_key": "basketball_nba",
+      "sport_title": "NBA",
+      "commence_time": "2024-10-29T23:30:00Z",
+      "home_team": "Minnesota Timberwolves",
+      "away_team": "Dallas Mavericks",
+      "bookmakers": []
+    }
+  },
+  "headers": {
+    "Date": "Tue, 19 Aug 2025 07:48:59 GMT",
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": "342",
+    "Connection": "keep-alive",
+    "X-Requests-Used": "5740",
+    "X-Requests-Remaining": "14260",
+    "X-Requests-Last": "0",
+    "vary": "Accept-Encoding",
+    "Apigw-Requestid": "PivgkjTKIAMEMGA="
+  },
+  "url": "https://api.the-odds-api.com/v4/historical/sports/basketball_nba/events/15893327c28d5d11f74b1b9a0560aa78/odds?apiKey=83e6497c8f87c47af8ea4bf172fcbc83&date=2024-10-30T00%3A00%3A00Z&regions=us_dfs&markets=player_points&bookmakers=prizepicks&oddsFormat=american&dateFormat=iso",
+  "from_cache": false
+}

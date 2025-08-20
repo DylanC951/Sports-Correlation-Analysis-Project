@@ -1,0 +1,4 @@
+player,stat,direction,correlation,edge,odds,confidence
+1,PTS,OVER,0.223,0.0430,1.91/1.91,LOW
+2,AST,OVER,0.223,0.0200,1.83/1.83,LOW
+1,PTS,OVER,0.213,0.0400,1.91/1.91,LOW

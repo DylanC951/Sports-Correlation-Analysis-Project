@@ -26,7 +26,6 @@ def parse_utc(ts) -> Timestamp:
     return pd.to_datetime(ts, utc=True)
 
 def dates_in_january_2025():
-    # March slate (kept as-is to match your earlier runs)
     d0, d1 = dt.date(2025,3,1), dt.date(2025,3,31)
     d = d0
     while d <= d1:
@@ -99,22 +98,12 @@ def parse_event_props(data, platform: str):
                 lines[(nm, stat)] = float(pt)
     return players, lines
 
-# -------------------- payout tables --------------------
+# payout calculators
 def prizepicks_6flex():
-    # Keep your previous simplification unless you want to change it too
     return {6: 37.5, 5: 0.0, 4: 0.0}
 
-def underdog_6flex_reduced():
-    """
-    Reduction-only payouts when legs push/void.
-    Only pay when ALL remaining (non-push) legs hit.
-      6 legs -> 37.5x
-      5 legs -> 20x
-      4 legs -> 10x
-      3 legs -> 6x
-      2 legs -> 3x
-    """
-    return {6: 37.5, 5: 20.0, 4: 10.0, 3: 6.0, 2: 3.0}
+def underdog_6flex():
+    return {6: 37.5, 5: 0.0, 4: 0.0}
 
 def grade_entry(picks, platform: str):
     """
@@ -122,34 +111,24 @@ def grade_entry(picks, platform: str):
       {"name":..., "stat":..., "dir": "OVER"/"UNDER", "line": float, "actual": float, "push": bool}
     returns (hits, pushes, paid_multiple)
     """
-    hits = 0
-    misses = 0
-    pushes = 0
-    for p in picks:
-        if p.get("push"):
-            pushes += 1
-            continue
-        hit = (p["actual"] > p["line"]) if p["dir"] == "OVER" else (p["actual"] < p["line"])
-        hits += int(hit)
-        misses += int(not hit)
-
-    legs_effective = len(picks) - pushes
-
-    # Underdog reduction-on-pushes (what you requested):
-    if platform == "underdog":
-        table = underdog_6flex_reduced()
-        # Only pay if *all* remaining legs hit
-        if misses == 0 and legs_effective in table:
-            return hits, pushes, table[legs_effective]
-        else:
-            return hits, pushes, 0.0
-
-    # PrizePicks (keep previous simple behavior)
-    table = prizepicks_6flex()
-    if legs_effective < 4:
+    hits = sum(
+        1 for p in picks
+        if (not p["push"]) and ((p["actual"] > p["line"]) if p["dir"] == "OVER" else (p["actual"] < p["line"]))
+    )
+    pushes = sum(1 for p in picks if p["push"])
+    legs = len(picks) - pushes
+    # downgrade flex on pushes
+    table = underdog_6flex() if platform == "underdog" else prizepicks_6flex()
+    target = legs
+    # payout only defined for legs >= 4 in a 6-pick flex context
+    if target < 4:
         return hits, pushes, 0.0
-    if misses == 0 and legs_effective in table:
-        return hits, pushes, table[legs_effective]
+    if hits >= target:
+        return hits, pushes, table.get(target, 0.0)
+    if hits == target - 1:
+        return hits, pushes, table.get(5 if target == 6 else target - 1, 0.0)
+    if hits == target - 2 and target == 6:
+        return hits, pushes, table.get(4, 0.0)
     return hits, pushes, 0.0
 
 def leg_result(leg):
@@ -158,7 +137,7 @@ def leg_result(leg):
     hit = (leg["actual"] > leg["line"]) if leg["dir"] == "OVER" else (leg["actual"] < leg["line"])
     return "HIT" if hit else "MISS"
 
-# -------------------- robust odds fetch with fallbacks --------------------
+# -------------------- NEW: robust odds fetch with fallbacks --------------------
 def fetch_event_props_with_fallback(fetcher: LiveLineFetcher, ev_id: str, tip: Timestamp):
     """
     Try several nearby snapshots around tipoff to reduce 404s from the historical odds endpoint.
@@ -176,18 +155,20 @@ def fetch_event_props_with_fallback(fetcher: LiveLineFetcher, ev_id: str, tip: T
         snap = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             data = fetcher.historical_event_props(ev_id, snap, MARKETS)
+            # data comes already unwrapped (bookmakers at top-level)
             if data and isinstance(data, dict) and data.get("bookmakers"):
                 return data, snap
         except requests.HTTPError as e:
+            # 404/400 -> just try next snapshot; re-raise other codes
             code = getattr(e.response, "status_code", None)
             if code in (404, 400):
                 continue
             raise
         except Exception:
+            # network or JSON hiccup, try next
             continue
     return None, None
 
-# -------------------- cross-entry constraints helpers --------------------
 def _pra_conflict_for_player(prev_stats: set, new_stat: str) -> bool:
     """
     Enforce per-player PRA overlap across DIFFERENT slips (same event/day):
@@ -201,7 +182,7 @@ def _pra_conflict_for_player(prev_stats: set, new_stat: str) -> bool:
         return True
     return False
 
-# -------------------- build entries (adds pair_id, de-dupes player/stat across slips) --------------------
+
 def build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game, date_, platform):
     """
     Build up to 3 six-leg entries (3 pairs per entry) for the day.
@@ -209,19 +190,20 @@ def build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game,
     Constraints across different entries of the SAME event (game):
       1) Do NOT re-use the exact (p1,stat1)-(p2,stat2) market combo for the same unordered pair {p1,p2}.
       2) Per-player PRA overlap rule (see _pra_conflict_for_player).
-      3) NEW: Do NOT re-use (player, stat) across slips for the same event (prevents dupes like Haliburton PTS twice).
+
+    Within a single entry we still avoid re-using a player (seen_players), so
+    the new PRA rule only affects later entries for the same event.
     """
     entries = []
     used_pairs_global = set()  # exact quadruples (p1,p2,stat1,stat2) to avoid literal repeats
 
     # (1) Pair+market de-dup across entries:
-    used_market_combos = defaultdict(set)  # event_id -> set(frozenset({(p1, s1), (p2, s2)}))
+    #     event_id -> set(frozenset({(p1, s1), (p2, s2)}))
+    used_market_combos = defaultdict(set)
 
     # (2) Per-player stats used in prior entries (to enforce PRA overlap):
-    used_stats_by_player = defaultdict(lambda: defaultdict(set))  # event_id -> player -> set(stats_used)
-
-    # (3) NEW: prevent reusing the very same (player,stat) in multiple slips for that event
-    used_player_stat_in_event = defaultdict(set)  # event_id -> set((player, stat))
+    #     event_id -> player -> set(stats_used)
+    used_stats_by_player = defaultdict(lambda: defaultdict(set))
 
     # strongest first
     corr_df = (
@@ -264,12 +246,6 @@ def build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game,
                 if _pra_conflict_for_player(used_stats_by_player[event_id][p2], stat2):
                     continue
 
-                # (3) NEW: don't reuse same (player,stat) across slips within event
-                if (p1, stat1) in used_player_stat_in_event[event_id]:
-                    continue
-                if (p2, stat2) in used_player_stat_in_event[event_id]:
-                    continue
-
                 chosen.append((p1, p2, stat1, stat2, row["correlation"]))
                 seen_players.update([p1, p2])
                 if len(chosen) == 3:
@@ -287,24 +263,23 @@ def build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game,
                 six_legs.append({
                     "name": p1, "stat": s1, "dir": direction,
                     "line": L[(p1, s1)],
-                    "pair_id": idx,  # <-- FIX: carry real pair id
+                    "pair_idx": idx,
                 })
                 six_legs.append({
                     "name": p2, "stat": s2, "dir": direction,
                     "line": L[(p2, s2)],
-                    "pair_id": idx,  # <-- FIX
+                    "pair_idx": idx,
                 })
 
                 # mark exact usage and pair+market combo for cross-entry constraints
                 used_pairs_global.add((p1, p2, s1, s2))
                 used_market_combos[event_id].add(frozenset(((p1, s1), (p2, s2))))
 
-            # after we finalize *this* entry, update per-player used stats & (player,stat) per-event
+            # after we finalize *this* entry, update per-player used stats
+            # so the PRA overlap rule only affects subsequent entries (as intended)
             for (p1, p2, s1, s2, _) in chosen:
                 used_stats_by_player[event_id][p1].add(s1)
                 used_stats_by_player[event_id][p2].add(s2)
-                used_player_stat_in_event[event_id].add((p1, s1))
-                used_player_stat_in_event[event_id].add((p2, s2))
 
             entries.append({
                 "event_id": event_id,
@@ -318,7 +293,8 @@ def build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game,
 
     return entries
 
-# -------------------- evaluate pair outcomes --------------------
+
+# -------------------- NEW: evaluate pair outcomes (success/fail/push) --------------------
 def evaluate_pair_outcomes(legs):
     """
     legs carry 'pair_id' (1..3). For each pair:
@@ -330,14 +306,14 @@ def evaluate_pair_outcomes(legs):
     from collections import defaultdict
     groups = defaultdict(list)
     for lg in legs:
-        pid = lg.get("pair_id")  # <-- uses pair_id
+        pid = lg.get("pair_id")
         if pid is not None:
             groups[pid].append(lg)
 
     succ = fail = push = 0
-    for _, items in groups.items():
+    for pid, items in groups.items():
         if len(items) != 2:
-            continue
+            continue  # safety
         r1, r2 = leg_result(items[0]), leg_result(items[1])
         if "PUSH" in (r1, r2):
             push += 1
@@ -348,9 +324,9 @@ def evaluate_pair_outcomes(legs):
     return succ, fail, push
 
 def main(platform: str, stake: float, bankroll: float):
+    # You may also pass the key into LiveLineFetcher(...) directly if preferred.
     fetch = LiveLineFetcher(os.getenv("ODDS_API_KEY"))
-    # Loosen p-value slightly since the upgraded analyzer shrinks r by default.
-    analyzer = ParlayAnalyzer(min_games=10, min_corr=0.35, max_p=0.10)
+    analyzer = ParlayAnalyzer(min_games=15, min_corr=0.35)
 
     results = []       # per-entry summary rows
     legs_details = []  # per-leg detailed rows
@@ -366,6 +342,7 @@ def main(platform: str, stake: float, bankroll: float):
         # 1) list events for the day (use noon UTC snapshot to get the day's slate)
         iso_day = dt.datetime.combine(date_, dt.time(12,0)).strftime("%Y-%m-%dT%H:%M:%SZ")
         events = fetch.historical_events(iso_day)
+        # filter to games actually on that calendar day:
         todays = []
         for ev in events:
             ct = parse_utc(ev["commence_time"]).date()
@@ -410,13 +387,12 @@ def main(platform: str, stake: float, bankroll: float):
 
         # 4) CROSS-MARKET correlations up to (not including) this date
         corr_df = analyzer.analyze_cross_market_pairs(game_players, player_data, date_)
+
         if corr_df.empty:
             continue
 
-        # 5) build up to 3 six-leg entries (cross-market aware, with pair_id)
+        # 5) build 3 six-leg entries (cross-market aware, with pair_id)
         entries = build_three_entries_for_day_any_market(corr_df, game_players, lines_by_game, date_, platform)
-        if not entries:
-            continue
 
         # 6) grade entries using actual stats for that date
         for ent in entries:
@@ -469,26 +445,16 @@ def main(platform: str, stake: float, bankroll: float):
                     "line": leg["line"], "actual": leg["actual"], "result": leg_result(leg)
                 })
 
-    # --- write outputs (robust to empty results) ---
-    summary_cols = ["date","platform","event_id","entry_id","hits","pushes","mult","stake","pnl","bankroll","pair_success","pair_fail","pair_push"]
-    legs_cols = ["date","platform","event_id","entry_id","leg_idx","pair_id","player","stat","dir","line","actual","result"]
-
-    df = pd.DataFrame(results, columns=summary_cols)
-    if not df.empty:
-        df = df.sort_values(["date","entry_id"])
-    else:
-        print("\n[INFO] No entries were generated. Consider loosening thresholds (e.g., min_corr=0.30, max_p=0.15) or widening stats.")
+    # --- write outputs
+    df = pd.DataFrame(results).sort_values(["date","entry_id"])
     df.to_csv(f"jan_2025_{platform}_backtest.csv", index=False)
 
-    df_legs = pd.DataFrame(legs_details, columns=legs_cols)
-    if not df_legs.empty:
-        df_legs = df_legs.sort_values(["date","entry_id","leg_idx"])
+    df_legs = pd.DataFrame(legs_details).sort_values(["date","entry_id","leg_idx"])
     df_legs.to_csv(f"jan_2025_{platform}_backtest_legs.csv", index=False)
 
-    if not df.empty:
-        print(df.tail(10))
+    print(df.tail(10))
     print("\nFinal bankroll:", bal, "  P&L:", bal - bankroll)
-    print(f"Total pair outcomes across month -> success={total_pair_success}, fail={total_pair_fail}, push={total_pair_push}") 
+    print(f"Total pair outcomes across month -> success={total_pair_success}, fail={total_pair_fail}, push={total_pair_push}")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
